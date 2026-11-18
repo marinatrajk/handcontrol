@@ -53,6 +53,16 @@ struct HandPose {
     /// Index tip to index knuckle, in palm lengths. Small when the hand is a fist.
     var indexReach: CGFloat { distance(.indexTip, .indexMCP) / palmSize }
 
+    /// Which way the index and middle fingers point, in degrees: 0 straight up, 90 sideways, 180 straight down.
+    var twoFingerTilt: CGFloat {
+        var dx: CGFloat = 0, dy: CGFloat = 0
+        for finger in [Finger.index, .middle] {
+            dx += (self[finger.tip].x - self[finger.mcp].x) * aspect
+            dy += self[finger.tip].y - self[finger.mcp].y
+        }
+        return atan2(abs(dx), -dy) * 180 / .pi
+    }
+
     /// The pointer anchor: the middle of the four knuckles.
     /// Knuckles barely move when fingers bend, so pinching doesn't nudge the pointer.
     var knuckles: CGPoint {

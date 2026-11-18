@@ -236,7 +236,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for line in [
             "Move your hand: the pointer follows your knuckles",
             "Pinch thumb and index: click (twice for double-click)",
-            "Two fingers up: scroll. Move up or down from where you started; further is faster",
+            "Two fingers up: the pointer parks",
+            "…then turn them sideways and move up or down to scroll; pull back a little to stop",
             "Three fingers up: grab and drag, open your hand to drop",
             "Flat open hand: the pointer parks",
             "Open hand, swipe down: close the front window",
@@ -289,6 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .point: symbol = "hand.point.up.left.fill"
             case .open: symbol = "hand.raised.fill"
             case .drag: symbol = "hand.draw.fill"
+            case .scrollReady: symbol = "rotate.right"
             case .scroll: symbol = "arrow.up.and.down"
             }
         }

@@ -6,7 +6,8 @@ Control your Mac with your hand through the built-in camera. It's a menu bar app
 | --- | --- |
 | Move your hand (relaxed or pointing) | The pointer follows your knuckles |
 | Pinch thumb and index | Click. Pinch twice quickly to double-click |
-| Two fingers up (index, middle) | Scroll. Move your hand up or down from where you started; the further you go, the faster it scrolls. Pull back a little to stop. Bringing your hand back to the start never scrolls the other way. It follows your Mac's natural scrolling setting |
+| Two fingers up (index, middle) | The pointer parks over what you want to scroll |
+| …then turn them sideways | Scroll: move your hand up or down from where you started; the further you go, the faster it scrolls. Pull back a little to stop, or turn your fingers back up. Bringing your hand back to the start never scrolls the other way. It follows your Mac's natural scrolling setting |
 | Three fingers up (index, middle, ring) | Grab: the mouse button stays down while you move. Change shape to drop |
 | Flat open hand (four fingers straight) | The pointer parks, so you can reposition your hand |
 | Open hand, swipe down | Close the front window |

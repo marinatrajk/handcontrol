@@ -17,10 +17,11 @@ enum HandMode: String {
     case point = "Pointing"
     case open = "Open hand · pointer parked"
     case drag = "Grabbing"
+    case scrollReady = "Two fingers · turn them sideways to scroll"
     case scroll = "Scrolling"
 
     /// Modes where the pointer stays put instead of following the hand.
-    var parksPointer: Bool { self == .open || self == .scroll }
+    var parksPointer: Bool { self == .open || self == .scrollReady || self == .scroll }
 }
 
 struct EngineStatus {
@@ -34,6 +35,8 @@ struct EngineStatus {
     var scrollZone: ClosedRange<CGFloat>?
     /// -1 scrolling toward the top, 1 toward the bottom, 0 not scrolling.
     var scrollDirection = 0
+    /// Which way two raised fingers point, in degrees: 0 straight up, 90 sideways.
+    var tilt: CGFloat?
 }
 
 /// How much the pointer is smoothed. Steadier means less wobble but a little more lag.
@@ -103,8 +106,13 @@ struct GestureConfig {
     /// A new hand shape has to win most of the frames over this long before the mode changes,
     /// so one misread frame can't block or trigger a change.
     var poseHold = 0.12
-    /// Two fingers up has to last a bit longer, so a relaxed hand doesn't start scrolling by accident.
+    /// Two fingers up has to last a bit longer, so a relaxed hand doesn't park the pointer by accident.
     var scrollHold = 0.2
+    /// Two raised fingers count as sideways (scrolling) past `sidewaysOn` degrees from straight up, and
+    /// stop counting below `sidewaysOff`. Past `sidewaysMax` they point down, which doesn't count.
+    var sidewaysOn: CGFloat = 60
+    var sidewaysOff: CGFloat = 45
+    var sidewaysMax: CGFloat = 145
     /// Share of frames in the hold window that must show the new shape.
     var shapeAgreement = 0.7
     /// The hand can vanish this long (motion blur, a missed frame) before it counts as gone.
@@ -164,7 +172,8 @@ struct GestureConfig {
 ///
 /// - Any relaxed or pointing hand: the pointer follows your knuckles.
 /// - Pinch thumb and index: click (pinch twice quickly to double-click).
-/// - Two fingers up (index, middle): scroll. Move up or down from where you started; further is faster.
+/// - Two fingers up (index, middle): the pointer parks. Turn them sideways to scroll: move up or down from
+///   where you started, further is faster, pull back a little to stop.
 /// - Three fingers up (index, middle, ring): grab. The button stays down while you move; change shape to drop.
 /// - Flat open hand (four fingers straight): the pointer parks. Swipe it down to close the front window.
 final class GestureEngine {
@@ -181,10 +190,10 @@ final class GestureEngine {
         EngineStatus(mode: mode, straight: straight, pinched: pinched, pinchGap: pinchGap,
                      scrollAnchor: mode == .scroll ? scrollAnchor : nil,
                      scrollZone: mode == .scroll ? scrollLo...scrollHi : nil,
-                     scrollDirection: scrollDirection)
+                     scrollDirection: scrollDirection, tilt: tilt)
     }
 
-    private enum Shape { case point, two, three, open }
+    private enum Shape { case point, two, twoSideways, three, open }
     private var shape = Shape.point
     private var shapes: [(t: Double, s: Shape)] = []
     private var present = false
@@ -199,7 +208,11 @@ final class GestureEngine {
     private var lock: (p: CGPoint, until: Double)?
     private var glideFrom: (p: CGPoint, t: Double)?
 
+    /// The wrist, lightly smoothed. Scrolling follows the wrist because it barely moves when you
+    /// turn your fingers, unlike the knuckles.
     private var palm: CGPoint?
+    private var sideways = false
+    private var tilt: CGFloat?
     private var scrollAnchor: CGPoint?
     /// Scrolling stops while the hand is between these heights (picture coordinates).
     private var scrollLo: CGFloat = 0
@@ -257,11 +270,22 @@ final class GestureEngine {
         } else if straight.allSatisfy({ $0 }) && !ringDown && !littleDown {
             raw = .open
         } else if straight[0] && straight[1] && ringDown && littleDown {
-            raw = .two
+            let angle = hand.twoFingerTilt
+            if sideways {
+                if angle < config.sidewaysOff || angle > config.sidewaysMax + 10 { sideways = false }
+            } else if angle > config.sidewaysOn && angle < config.sidewaysMax {
+                sideways = true
+            }
+            tilt = angle
+            raw = sideways ? .twoSideways : .two
         } else if straight[0] && straight[1] && straight[2] {
             raw = .three
         } else {
             raw = .point
+        }
+        if raw != .two && raw != .twoSideways {
+            sideways = false
+            tilt = nil
         }
 
         // A new shape has to win most frames over a short window before it counts.
@@ -273,12 +297,14 @@ final class GestureEngine {
             held = nil; palm = nil
             trail = []; swipe = []; recent = []; notOpenSince = nil; pendingClose = nil
             shapes = []
-            shape = raw == .three || raw == .two ? .point : raw   // don't grab or scroll the instant a hand appears
+            // Don't grab or scroll the instant a hand appears.
+            shape = raw == .three || raw == .two || raw == .twoSideways ? .point : raw
         }
         shapes.append((t, raw))
         shapes.removeAll { t - $0.t > 0.5 }
         if raw != shape {
-            let hold = raw == .two ? config.scrollHold : config.poseHold
+            // Raising two fingers waits a little longer; turning them back up from scrolling is quick.
+            let hold = raw == .two && shape != .twoSideways ? config.scrollHold : config.poseHold
             if let oldest = shapes.first, t - oldest.t >= hold - 0.001 {
                 let window = shapes.filter { t - $0.t <= hold + 0.001 }
                 let agree = window.filter { $0.s == raw }.count
@@ -291,16 +317,17 @@ final class GestureEngine {
         let smooth = CGPoint(x: fx.filter(target.x, t, minCutoff: config.minCutoff, beta: config.beta, slopeCutoff: config.slopeCutoff),
                              y: fy.filter(target.y, t, minCutoff: config.minCutoff, beta: config.beta, slopeCutoff: config.slopeCutoff))
         let aim = deadband(smooth)
-        let k = hand.knuckles
+        let w = hand[.wrist]
         let a = config.scrollSmoothing
-        palm = palm.map { CGPoint(x: $0.x + (k.x - $0.x) * a, y: $0.y + (k.y - $0.y) * a) } ?? k
+        palm = palm.map { CGPoint(x: $0.x + (w.x - $0.x) * a, y: $0.y + (w.y - $0.y) * a) } ?? w
 
         // Mode changes.
         let newMode: HandMode
         switch shape {
         case .open: newMode = .open
         case .three: newMode = .drag
-        case .two: newMode = .scroll
+        case .two: newMode = .scrollReady
+        case .twoSideways: newMode = .scroll
         case .point: newMode = .point
         }
         if newMode != mode {
@@ -390,7 +417,9 @@ final class GestureEngine {
             } else {
                 scrollPeak = nil
             }
-            if over != 0 {
+            // Only scroll on frames where the fingers really are sideways, so turning them back up
+            // stops it at once.
+            if over != 0 && raw == .twoSideways {
                 let k = min(1, abs(over) / config.scrollRange)
                 let speed = config.scrollMaxSpeed * pow(k, config.scrollCurve)
                 // Hand down: natural scrolling moves the content down too (positive), like a trackpad.
@@ -459,6 +488,8 @@ final class GestureEngine {
         lock = nil
         glideFrom = nil
         palm = nil
+        sideways = false
+        tilt = nil
         scrollAnchor = nil
         scrollDirection = 0
         swipe = []

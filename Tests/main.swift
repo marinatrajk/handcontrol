@@ -22,11 +22,18 @@ func noise() -> CGFloat {
 
 /// A right hand, palm to the camera, fingers up, with its knuckle center at `c`.
 /// Offsets are in palm lengths (`s`, in picture heights).
+/// `turn` rotates the whole hand (degrees, positive turns the fingers to the right). It spins around the
+/// knuckle center, or around a point `pivot` palm lengths below the wrist, like a turning forearm.
 func hand(at c: CGPoint, _ fingers: [FingerShape], thumb: ThumbShape = .tucked,
-          size s: CGFloat = 0.18, jitter: CGFloat = 0.0015, shake: CGPoint = .zero) -> HandPose {
+          size s: CGFloat = 0.18, jitter: CGFloat = 0.0015, shake: CGPoint = .zero,
+          turn: CGFloat = 0, pivot: CGFloat? = nil) -> HandPose {
     let aspect: CGFloat = 16.0 / 9.0
     var points = [CGPoint](repeating: .zero, count: 21)
-    func put(_ j: Joint, _ u: CGFloat, _ v: CGFloat) {
+    let angle = turn * .pi / 180, cs = cos(angle), sn = sin(angle)
+    let pv: CGFloat = pivot.map { 1 + $0 } ?? 0
+    func put(_ j: Joint, _ u0: CGFloat, _ v0: CGFloat) {
+        let du = u0, dv = v0 - pv
+        let u = du * cs - dv * sn, v = du * sn + dv * cs + pv
         points[j.rawValue] = CGPoint(x: c.x + shake.x + u * s / aspect + noise() * jitter,
                                      y: c.y + shake.y + v * s + noise() * jitter)
     }
@@ -226,78 +233,103 @@ do {
     check(clicked.first { $0.isClick }?.point == p, "pinching from an open hand clicks at the parked pointer")
 }
 
+/// Two fingers turned sideways (around the forearm), with the hand `dy` below the middle of the area.
+func side(_ dy: CGFloat, _ fingers: [FingerShape] = two, turn: CGFloat = 90) -> HandPose {
+    hand(at: at(0, dy), fingers, turn: turn, pivot: 0.2)
+}
+
 print("Two-finger scroll")
 do {
     let sim = Sim()
     sim.run(1.0) { _ in hand(at: center, pointing) }
     let parked = sim.pointer
     var acts = sim.run(0.5) { _ in hand(at: center, two) }
-    check(sim.engine.mode == .scroll, "two fingers up starts scrolling mode")
-    check(!acts.contains { $0.isScroll }, "holding still in the start spot doesn't scroll")
-    acts = sim.run(0.2) { k in hand(at: at(0, 0.1 * k), two) } + sim.run(0.5) { _ in hand(at: at(0, 0.1), two) }
+    check(sim.engine.mode == .scrollReady, "two fingers up gets ready to scroll and parks the pointer")
+    acts += sim.run(0.3) { k in hand(at: at(0, 0.08 * k), two) } + sim.run(0.3) { k in hand(at: at(0, 0.08 * (1 - k)), two) }
+    check(!acts.contains { $0.isScroll } && !acts.contains { $0.isMove }, "moving with two fingers up doesn't scroll or move the pointer")
+    acts = sim.run(0.3) { k in side(0, turn: 90 * k) } + sim.run(0.3) { _ in side(0) }
+    check(sim.engine.mode == .scroll, "turning the two fingers sideways starts scrolling")
+    check(!acts.contains { $0.isScroll } && sim.pointer == parked, "turning the hand doesn't scroll or move the pointer")
+    acts = sim.run(0.2) { k in side(0.1 * k) } + sim.run(0.5) { _ in side(0.1) }
     let down = acts.reduce(0) { $0 + $1.scrolled }
-    check(down > 100, "hand below the start spot scrolls (content follows the hand down)", "\(down) px")
+    check(down > 100, "moving sideways fingers down scrolls (content follows the hand down)", "\(down) px")
     check(!acts.contains { $0.isMove } && sim.pointer == parked, "the pointer stays put while scrolling")
-    let more = sim.run(0.5) { _ in hand(at: at(0, 0.1), two) }.reduce(0) { $0 + $1.scrolled }
+    let more = sim.run(0.5) { _ in side(0.1) }.reduce(0) { $0 + $1.scrolled }
     check(more > 100, "it keeps scrolling while the hand stays there", "\(more) px in 0.5 s")
-    sim.run(0.15) { k in hand(at: at(0, 0.1 + 0.08 * k), two) }
-    let far = sim.run(0.5) { _ in hand(at: at(0, 0.18), two) }.reduce(0) { $0 + $1.scrolled }
+    sim.run(0.15) { k in side(0.1 + 0.08 * k) }
+    let far = sim.run(0.5) { _ in side(0.18) }.reduce(0) { $0 + $1.scrolled }
     check(far > more * 2, "further from the start spot scrolls faster", "\(more) → \(far) px per 0.5 s")
-    sim.run(0.3) { k in hand(at: at(0, 0.18 * (1 - k)), two) }
-    sim.run(0.2) { _ in hand(at: center, two) }
-    let back = sim.run(0.4) { _ in hand(at: center, two) }
+    sim.run(0.3) { k in side(0.18 * (1 - k)) }
+    sim.run(0.2) { _ in side(0) }
+    let back = sim.run(0.4) { _ in side(0) }
     check(!back.contains { $0.isScroll }, "returning to the start spot stops scrolling")
-    let up = sim.run(0.2) { k in hand(at: at(0, -0.1 * k), two) } + sim.run(0.5) { _ in hand(at: at(0, -0.1), two) }
-    check(up.reduce(0) { $0 + $1.scrolled } < -100, "hand above the start spot scrolls the other way")
+    let up = sim.run(0.2) { k in side(-0.1 * k) } + sim.run(0.5) { _ in side(-0.1) }
+    check(up.reduce(0) { $0 + $1.scrolled } < -100, "moving them up scrolls the other way")
+    let turning = sim.run(0.3) { k in side(-0.1, turn: 90 * (1 - k)) }
+    let settled = sim.run(0.4) { _ in side(-0.1, turn: 0) }
+    check(!(turning + settled).contains { $0.scrolled > 0 }, "turning the fingers back up doesn't jolt the page the other way")
+    check(!settled.contains { $0.isScroll } && sim.engine.mode == .scrollReady, "and once they're up, scrolling stops")
     let after = sim.run(0.5) { _ in hand(at: at(0, -0.1), pointing) }
     check(after.contains { $0.isMove }, "pointing again moves the pointer again")
-    check(!after.dropFirst(6).contains { $0.isScroll }, "and scrolling stops")
+
+    let tilted = Sim()
+    tilted.run(0.5) { _ in hand(at: center, pointing) }
+    tilted.run(0.8) { _ in side(0, turn: 30) }
+    check(tilted.engine.mode == .scrollReady, "fingers only slightly tilted don't scroll")
+    let downward = Sim()
+    downward.run(0.5) { _ in hand(at: center, pointing) }
+    downward.run(0.8) { _ in side(0, turn: 170) }
+    check(downward.engine.mode != .scroll, "fingers pointing down don't scroll")
+    let leftward = Sim()
+    leftward.run(0.5) { _ in hand(at: center, pointing) }
+    leftward.run(0.5) { _ in side(0, turn: -90) }
+    check(leftward.engine.mode == .scroll, "turning the fingers the other way works too")
 
     let flicker = Sim()
     flicker.run(0.5) { _ in hand(at: center, pointing) }
     var frame = 0
-    flicker.run(0.6) { _ in frame += 1; return hand(at: center, frame % 4 == 0 ? three : two) }
-    check(flicker.engine.mode == .scroll, "two fingers still start scrolling when every 4th frame is misread")
+    flicker.run(0.6) { _ in frame += 1; return side(0, frame % 4 == 0 ? three : two) }
+    check(flicker.engine.mode == .scroll, "it still starts when every 4th frame is misread")
     let tucked = Sim()
     tucked.run(0.5) { _ in hand(at: center, open) }
-    tucked.run(0.6) { _ in hand(at: center, [.straight, .straight, .half, .half]) }
+    tucked.run(0.6) { _ in side(0, [.straight, .straight, .half, .half]) }
     check(tucked.engine.mode == .scroll, "two fingers count when ring and little are only half folded")
 
     let classic = Sim { $0.naturalScroll = false }
     classic.run(0.5) { _ in hand(at: center, pointing) }
-    classic.run(0.5) { _ in hand(at: center, two) }
-    let flipped = classic.run(0.2) { k in hand(at: at(0, 0.1 * k), two) } + classic.run(0.5) { _ in hand(at: at(0, 0.1), two) }
+    classic.run(0.5) { _ in side(0) }
+    let flipped = classic.run(0.2) { k in side(0.1 * k) } + classic.run(0.5) { _ in side(0.1) }
     check(flipped.reduce(0) { $0 + $1.scrolled } < -100, "with natural scrolling off, the direction flips")
 
     let instant = Sim()
-    instant.run(0.1) { _ in hand(at: center, two) }
-    check(instant.engine.mode != .scroll, "a hand that appears showing two fingers doesn't scroll instantly")
+    instant.run(0.1) { _ in side(0) }
+    check(instant.engine.mode != .scroll, "a hand that appears with sideways fingers doesn't scroll instantly")
     let passing = Sim()
     passing.run(0.5) { _ in hand(at: center, pointing) }
     passing.run(0.1) { _ in hand(at: center, two) }
     passing.run(0.4) { _ in hand(at: center, three) }
-    check(passing.engine.mode == .drag, "raising fingers on the way to three doesn't get stuck scrolling")
+    check(passing.engine.mode == .drag, "raising fingers on the way to three doesn't get stuck")
 }
 
 print("Scroll control")
 do {
     let sim = Sim()
     sim.run(1.0) { _ in hand(at: center, pointing) }
-    sim.run(0.5) { _ in hand(at: center, two) }
-    sim.run(0.1) { k in hand(at: at(0, 0.06 * k), two) }
-    let gentle = sim.run(1.0) { _ in hand(at: at(0, 0.06), two) }.reduce(0) { $0 + $1.scrolled }
+    sim.run(0.5) { _ in side(0) }
+    sim.run(0.1) { k in side(0.06 * k) }
+    let gentle = sim.run(1.0) { _ in side(0.06) }.reduce(0) { $0 + $1.scrolled }
     check(gentle > 20 && gentle < 200, "just past the start spot it scrolls slowly", "\(gentle) px per second")
-    sim.run(0.2) { k in hand(at: at(0, 0.06 + 0.06 * k), two) }
-    sim.run(0.5) { _ in hand(at: at(0, 0.12), two) }
-    sim.run(0.1) { k in hand(at: at(0, 0.12 - 0.035 * k), two) }
-    let pulled = sim.run(0.6) { _ in hand(at: at(0, 0.085), two) }
+    sim.run(0.2) { k in side(0.06 + 0.06 * k) }
+    sim.run(0.5) { _ in side(0.12) }
+    sim.run(0.1) { k in side(0.12 - 0.035 * k) }
+    let pulled = sim.run(0.6) { _ in side(0.085) }
     check(!pulled.dropFirst(4).contains { $0.isScroll }, "pulling back a little stops scrolling right there")
-    let resumed = sim.run(0.2) { k in hand(at: at(0, 0.085 + 0.08 * k), two) } + sim.run(0.4) { _ in hand(at: at(0, 0.165), two) }
+    let resumed = sim.run(0.2) { k in side(0.085 + 0.08 * k) } + sim.run(0.4) { _ in side(0.165) }
     check(resumed.reduce(0) { $0 + $1.scrolled } > 50, "pushing further from a stop starts scrolling again")
-    sim.run(0.1) { k in hand(at: at(0, 0.165 - 0.04 * k), two) }
-    let home = sim.run(0.6) { k in hand(at: at(0, 0.125 * (1 - k)), two) } + sim.run(0.4) { _ in hand(at: center, two) }
+    sim.run(0.1) { k in side(0.165 - 0.04 * k) }
+    let home = sim.run(0.6) { k in side(0.125 * (1 - k)) } + sim.run(0.4) { _ in side(0) }
     check(!home.contains { $0.scrolled < 0 }, "bringing the hand back to the start never scrolls the other way")
-    let other = sim.run(0.2) { k in hand(at: at(0, -0.1 * k), two) } + sim.run(0.4) { _ in hand(at: at(0, -0.1), two) }
+    let other = sim.run(0.2) { k in side(-0.1 * k) } + sim.run(0.4) { _ in side(-0.1) }
     check(other.reduce(0) { $0 + $1.scrolled } < -50, "going past the start the other way scrolls the other way")
 }
 

@@ -155,6 +155,7 @@ private final class OverlayView: NSView {
         case .point: return .systemBlue
         case .open: return .systemYellow
         case .drag: return .systemGreen
+        case .scrollReady: return .systemIndigo
         case .scroll: return .systemPurple
         }
     }
@@ -170,6 +171,9 @@ private final class OverlayView: NSView {
             var mode = status.pinched ? "Pinch · click" : status.mode.rawValue
             if status.mode == .scroll {
                 mode = status.scrollDirection == 0 ? "Scroll · move up or down" : "Scrolling · pull back to stop"
+            }
+            if let tilt = status.tilt, status.mode == .scrollReady || status.mode == .scroll {
+                mode += " · fingers at \(Int(tilt))°"
             }
             text = "\(mode) · \(up) finger\(up == 1 ? "" : "s") up · pinch gap \(String(format: "%.2f", status.pinchGap))"
         }
