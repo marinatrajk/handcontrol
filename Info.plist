@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>HandControl</string>
+    <key>CFBundleDisplayName</key>
+    <string>HandControl</string>
+    <key>CFBundleIdentifier</key>
+    <string>app.handcontrol.mac</string>
+    <key>CFBundleExecutable</key>
+    <string>HandControl</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>HandControl watches your hand so you can move the pointer, click and drag with gestures. The video is processed on your Mac and never saved or sent anywhere.</string>
+</dict>
+</plist>
