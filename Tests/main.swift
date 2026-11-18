@@ -311,6 +311,29 @@ do {
     check(passing.engine.mode == .drag, "raising fingers on the way to three doesn't get stuck")
 }
 
+print("Turning like a real hand")
+do {
+    // From a real recording: the fingers turn around the knuckles while the whole hand drifts up,
+    // and it keeps drifting a little after the fingers are already sideways.
+    func turned(_ dy: CGFloat, _ angle: CGFloat = 92) -> HandPose { hand(at: at(0, dy), two, turn: angle) }
+    let sim = Sim()
+    sim.run(1.0) { _ in hand(at: center, pointing) }
+    sim.run(0.5) { _ in hand(at: center, two) }
+    var acts = sim.run(0.6) { k in turned(-0.1 * (1 - (1 - k) * (1 - k)), 92 * k) }
+    acts += sim.run(0.25) { k in turned(-0.1 - 0.015 * k) }
+    acts += sim.run(1.0) { _ in turned(-0.115) }
+    let drift = acts.reduce(0) { $0 + abs($1.scrolled) }
+    check(drift < 20, "turning sideways and holding still doesn't scroll by itself", "\(drift) px")
+    let down = sim.run(0.2) { k in turned(-0.115 + 0.1 * k) } + sim.run(0.5) { _ in turned(-0.015) }
+    let downTotal = down.reduce(0) { $0 + $1.scrolled }
+    check(downTotal > 100, "then moving down scrolls one way", "\(downTotal) px")
+    sim.run(0.3) { k in turned(-0.015 - 0.1 * k) }
+    let up = sim.run(0.2) { k in turned(-0.115 - 0.1 * k) } + sim.run(0.5) { _ in turned(-0.215) }
+    let upTotal = up.reduce(0) { $0 + $1.scrolled }
+    check(upTotal < -100 && Double(-upTotal) > Double(downTotal) * 0.7,
+          "and moving up scrolls the other way just as well", "\(upTotal) px vs \(downTotal) px")
+}
+
 print("Scroll control")
 do {
     let sim = Sim()

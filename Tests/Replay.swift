@@ -19,7 +19,7 @@ func replay(_ path: String) {
     var last = start
     var scrolled = 0
 
-    print("  time  straightness i/m/r/l   pinch  mode")
+    print("  time  straightness i/m/r/l        pinch  tilt  wrist y  mode")
     for frame in recording.frames {
         let pose = recording.pose(frame)
         let actions = engine.update(pose, at: frame.t, pointer: pointer)
@@ -42,7 +42,9 @@ func replay(_ path: String) {
         } ?? "   (no hand)       "
         let gap = pose.map { String(format: "%.2f", $0.pinchGap) } ?? "  -  "
         let flags = status.straight.map { $0 ? "|" : "." }.joined()
-        print(String(format: "%6.2f  ", frame.t - start) + "\(fingers) \(flags)  \(gap)  \(status.mode.rawValue)"
+        let tilt = pose.map { String(format: "%4.0f°", $0.twoFingerTilt) } ?? "    -"
+        let wrist = pose.map { String(format: "%.3f", $0[.wrist].y) } ?? "  -  "
+        print(String(format: "%6.2f  ", frame.t - start) + "\(fingers) \(flags)  \(gap)  \(tilt)  \(wrist)  \(status.mode.rawValue)"
               + (events.isEmpty ? "" : "   → " + events.joined(separator: ", ")))
     }
     print("\nTime in each mode:")

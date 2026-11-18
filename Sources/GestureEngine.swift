@@ -138,6 +138,13 @@ struct GestureConfig {
     var scrollBackoff: CGFloat = 0.025
     /// How much the hand position is smoothed for scrolling (0...1, lower is smoother).
     var scrollSmoothing: CGFloat = 0.35
+    /// Turning your fingers sideways moves your hand too, so the start spot is only set once the
+    /// hand has settled: moving slower than this (picture heights per second), or after `scrollSettleMax`.
+    var scrollSettleSpeed: CGFloat = 0.15
+    var scrollSettleMax = 0.8
+    /// Until the first scroll, the start spot slowly re-centers on where the hand rests (this time
+    /// constant, in seconds), so drift after the turn can't leave one direction easier than the other.
+    var scrollRecenter = 0.6
     /// Follow the Mac's natural scrolling setting: with it on, the page moves the same way as your hand.
     var naturalScroll = true
 
@@ -208,9 +215,12 @@ final class GestureEngine {
     private var lock: (p: CGPoint, until: Double)?
     private var glideFrom: (p: CGPoint, t: Double)?
 
-    /// The wrist, lightly smoothed. Scrolling follows the wrist because it barely moves when you
-    /// turn your fingers, unlike the knuckles.
+    /// The knuckles, lightly smoothed, for scrolling. (Recorded hands showed people turn their fingers
+    /// sideways around the knuckles, while the wrist swings a long way.)
     private var palm: CGPoint?
+    private var scrollSettled = false
+    private var scrollStarted = false
+    private var scrollEntered = 0.0
     private var sideways = false
     private var tilt: CGFloat?
     private var scrollAnchor: CGPoint?
@@ -317,9 +327,9 @@ final class GestureEngine {
         let smooth = CGPoint(x: fx.filter(target.x, t, minCutoff: config.minCutoff, beta: config.beta, slopeCutoff: config.slopeCutoff),
                              y: fy.filter(target.y, t, minCutoff: config.minCutoff, beta: config.beta, slopeCutoff: config.slopeCutoff))
         let aim = deadband(smooth)
-        let w = hand[.wrist]
+        let k = hand.knuckles
         let a = config.scrollSmoothing
-        palm = palm.map { CGPoint(x: $0.x + (w.x - $0.x) * a, y: $0.y + (w.y - $0.y) * a) } ?? w
+        palm = palm.map { CGPoint(x: $0.x + (k.x - $0.x) * a, y: $0.y + (k.y - $0.y) * a) } ?? k
 
         // Mode changes.
         let newMode: HandMode
@@ -344,6 +354,9 @@ final class GestureEngine {
                 scrollHi = palm.y + config.scrollDeadZone
                 scrollPeak = nil
                 scrollCarry = 0
+                scrollSettled = false
+                scrollStarted = false
+                scrollEntered = t
             }
             scrollDirection = 0
         }
@@ -391,8 +404,28 @@ final class GestureEngine {
         // Two fingers: scroll faster the further the hand is past the stop zone around the start.
         // Pulling back a little stops it right there, and the stop zone follows the hand back toward
         // the start, so returning your hand never scrolls the other way.
-        if mode == .scroll, let anchor = scrollAnchor, let palm {
+        if mode == .scroll, !scrollSettled, let palm {
+            // Still finishing the turn: keep moving the start spot with the hand until it holds still.
+            scrollAnchor = palm
+            scrollLo = palm.y - config.scrollDeadZone
+            scrollHi = palm.y + config.scrollDeadZone
+            scrollPeak = nil
+            scrollCarry = 0
+            let fingersSideways = (tilt ?? 0) >= config.sidewaysOn
+            let caughtUp = abs(palm.y - k.y) < config.scrollDeadZone / 4
+            if (fingersSideways && caughtUp && speed() < config.scrollSettleSpeed) || t - scrollEntered > config.scrollSettleMax {
+                scrollSettled = true
+            }
+        } else if mode == .scroll, var anchor = scrollAnchor, let palm {
             let dz = config.scrollDeadZone, y = palm.y
+            if !scrollStarted && y > anchor.y - dz && y < anchor.y + dz && speed() < config.scrollSettleSpeed {
+                // Not scrolled yet and resting (or barely drifting) inside the stop zone: ease the start
+                // spot over to the hand. A deliberate move is too fast for this to chase.
+                anchor.y += (y - anchor.y) * CGFloat(min(1, dt / config.scrollRecenter))
+                scrollAnchor = anchor
+                scrollLo = anchor.y - dz
+                scrollHi = anchor.y + dz
+            }
             scrollLo = min(anchor.y - dz, max(scrollLo, y - dz))
             scrollHi = max(anchor.y + dz, min(scrollHi, y + dz))
             var over: CGFloat = 0
@@ -417,9 +450,9 @@ final class GestureEngine {
             } else {
                 scrollPeak = nil
             }
-            // Only scroll on frames where the fingers really are sideways, so turning them back up
-            // stops it at once.
-            if over != 0 && raw == .twoSideways {
+            // Only scroll on frames where the fingers really are sideways, so starting to turn them
+            // back up stops it at once.
+            if over != 0 && raw == .twoSideways && (tilt ?? 0) >= config.sidewaysOn {
                 let k = min(1, abs(over) / config.scrollRange)
                 let speed = config.scrollMaxSpeed * pow(k, config.scrollCurve)
                 // Hand down: natural scrolling moves the content down too (positive), like a trackpad.
@@ -429,6 +462,7 @@ final class GestureEngine {
                 if whole != 0 {
                     out.append(.scroll(Int(whole)))
                     scrollCarry -= whole
+                    scrollStarted = true
                 }
                 scrollDirection = over > 0 ? 1 : -1
             } else {
