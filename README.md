@@ -6,7 +6,7 @@ Control your Mac with your hand through the built-in camera. It's a menu bar app
 | --- | --- |
 | Move your hand (relaxed or pointing) | The pointer follows your knuckles |
 | Pinch thumb and index | Click. Pinch twice quickly to double-click |
-| Two fingers up (index, middle) | Scroll. Move your hand up or down from where you started; the further you go, the faster it scrolls. Come back to the start to stop. It follows your Mac's natural scrolling setting |
+| Two fingers up (index, middle) | Scroll. Move your hand up or down from where you started; the further you go, the faster it scrolls. Pull back a little to stop. Bringing your hand back to the start never scrolls the other way. It follows your Mac's natural scrolling setting |
 | Three fingers up (index, middle, ring) | Grab: the mouse button stays down while you move. Change shape to drop |
 | Flat open hand (four fingers straight) | The pointer parks, so you can reposition your hand |
 | Open hand, swipe down | Close the front window |
@@ -52,6 +52,14 @@ All other thresholds live in `GestureConfig` in `Sources/GestureEngine.swift`, i
 ```
 
 That runs the gesture engine against synthetic hands, so you can change the logic without waving at the camera.
+
+To tune on a real hand, choose **Record Hand for Tuning (10 s)** from the menu and repeat the gesture that misbehaves. The recording is saved to `~/Library/Logs/HandControl/`. It holds only the 21 joint positions per frame, never camera images. Play it back through the engine with:
+
+```bash
+./build.sh replay ~/Library/Logs/HandControl/hand-….json
+```
+
+The replay prints each frame's finger straightness, pinch gap and mode, so you can see exactly where a gesture was misread.
 
 ## License
 

@@ -126,16 +126,17 @@ private final class OverlayView: NSView {
             NSBezierPath(ovalIn: CGRect(x: k.x - 7, y: k.y - 7, width: 14, height: 14)).fill()
 
             // Scrolling: the band where it stops, and a line out to the hand when it's scrolling.
-            if let anchor = status.scrollAnchor {
+            if let anchor = status.scrollAnchor, let zone = status.scrollZone {
                 let a = map(anchor)
-                let half = status.scrollDeadZone * video.height
-                let band = NSBezierPath(roundedRect: CGRect(x: a.x - 34, y: a.y - half, width: 68, height: half * 2),
+                let top = video.minY + zone.lowerBound * video.height
+                let bottom = video.minY + zone.upperBound * video.height
+                let band = NSBezierPath(roundedRect: CGRect(x: a.x - 34, y: top, width: 68, height: bottom - top),
                                         xRadius: 6, yRadius: 6)
                 NSColor.systemPurple.withAlphaComponent(0.25).setFill()
                 band.fill()
                 if status.scrollDirection != 0 {
                     let line = NSBezierPath()
-                    line.move(to: a)
+                    line.move(to: CGPoint(x: a.x, y: status.scrollDirection > 0 ? bottom : top))
                     line.line(to: CGPoint(x: a.x, y: k.y))
                     line.lineWidth = 4
                     line.lineCapStyle = .round
@@ -168,7 +169,7 @@ private final class OverlayView: NSView {
             let up = status.straight.filter { $0 }.count
             var mode = status.pinched ? "Pinch · click" : status.mode.rawValue
             if status.mode == .scroll {
-                mode = status.scrollDirection == 0 ? "Scroll · move up or down" : "Scrolling"
+                mode = status.scrollDirection == 0 ? "Scroll · move up or down" : "Scrolling · pull back to stop"
             }
             text = "\(mode) · \(up) finger\(up == 1 ? "" : "s") up · pinch gap \(String(format: "%.2f", status.pinchGap))"
         }

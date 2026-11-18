@@ -28,9 +28,10 @@ struct EngineStatus {
     var straight: [Bool] = [false, false, false, false]
     var pinched = false
     var pinchGap: CGFloat = 1
-    /// Where the knuckles were when scrolling started (picture coordinates), and how far scrolling has to move from it.
+    /// Where the knuckles were when scrolling started, and the band of heights where scrolling stops
+    /// (picture coordinates).
     var scrollAnchor: CGPoint?
-    var scrollDeadZone: CGFloat = 0
+    var scrollZone: ClosedRange<CGFloat>?
     /// -1 scrolling toward the top, 1 toward the bottom, 0 not scrolling.
     var scrollDirection = 0
 }
@@ -95,10 +96,17 @@ struct GestureConfig {
     /// Ignore "pinches" when the index tip is curled into the palm (a fist), in palm lengths.
     var fistReach: CGFloat = 0.35
 
-    /// A new hand shape has to last this long before the mode changes.
+    /// A ring or little finger scoring below this counts as folded for two-finger scroll, even if it was
+    /// straight a moment ago. Those fingers are often half hidden under the thumb.
+    var relaxedFold: CGFloat = 1.1
+
+    /// A new hand shape has to win most of the frames over this long before the mode changes,
+    /// so one misread frame can't block or trigger a change.
     var poseHold = 0.12
     /// Two fingers up has to last a bit longer, so a relaxed hand doesn't start scrolling by accident.
     var scrollHold = 0.2
+    /// Share of frames in the hold window that must show the new shape.
+    var shapeAgreement = 0.7
     /// The hand can vanish this long (motion blur, a missed frame) before it counts as gone.
     var lostAfter = 0.25
 
@@ -112,11 +120,16 @@ struct GestureConfig {
     var glide = 0.15
 
     /// Two-finger scroll works like a joystick: move your hand up or down from where you started,
-    /// and the further you go the faster it scrolls. Distances are fractions of the picture height.
-    var scrollDeadZone: CGFloat = 0.03
+    /// and the further you go the faster it scrolls. Pull back a little to stop.
+    /// Distances are fractions of the picture height.
+    var scrollDeadZone: CGFloat = 0.04
     var scrollRange: CGFloat = 0.2
-    var scrollMaxSpeed: CGFloat = 3000   // points per second at full range
-    var scrollCurve: CGFloat = 1.6
+    var scrollMaxSpeed: CGFloat = 2000   // points per second at full range
+    var scrollCurve: CGFloat = 1.4
+    /// Moving back toward the start by this much stops scrolling, wherever your hand is.
+    var scrollBackoff: CGFloat = 0.025
+    /// How much the hand position is smoothed for scrolling (0...1, lower is smoother).
+    var scrollSmoothing: CGFloat = 0.35
     /// Follow the Mac's natural scrolling setting: with it on, the page moves the same way as your hand.
     var naturalScroll = true
 
@@ -167,13 +180,13 @@ final class GestureEngine {
     var status: EngineStatus {
         EngineStatus(mode: mode, straight: straight, pinched: pinched, pinchGap: pinchGap,
                      scrollAnchor: mode == .scroll ? scrollAnchor : nil,
-                     scrollDeadZone: config.scrollDeadZone, scrollDirection: scrollDirection)
+                     scrollZone: mode == .scroll ? scrollLo...scrollHi : nil,
+                     scrollDirection: scrollDirection)
     }
 
     private enum Shape { case point, two, three, open }
     private var shape = Shape.point
-    private var candidate = Shape.point
-    private var candidateSince = 0.0
+    private var shapes: [(t: Double, s: Shape)] = []
     private var present = false
     private var lastSeen = -Double.infinity
     private var lastFrame = 0.0
@@ -188,6 +201,10 @@ final class GestureEngine {
 
     private var palm: CGPoint?
     private var scrollAnchor: CGPoint?
+    /// Scrolling stops while the hand is between these heights (picture coordinates).
+    private var scrollLo: CGFloat = 0
+    private var scrollHi: CGFloat = 0
+    private var scrollPeak: CGFloat?
     private var scrollCarry: CGFloat = 0
     private var scrollDirection = 0
 
@@ -230,20 +247,24 @@ final class GestureEngine {
         }
 
         // Hand shape. A hand on its way into a pinch is always "pointing".
+        // Ring and little fingers count as folded when they're only half straight, since they're
+        // often tucked under the thumb and hard for the camera to see.
+        let ringDown = !straight[2] || hand.straightness(.ring) < config.relaxedFold
+        let littleDown = !straight[3] || hand.straightness(.little) < config.relaxedFold
         let raw: Shape
         if pinchGap < config.pinchOff {
             raw = .point
-        } else if straight.allSatisfy({ $0 }) {
+        } else if straight.allSatisfy({ $0 }) && !ringDown && !littleDown {
             raw = .open
+        } else if straight[0] && straight[1] && ringDown && littleDown {
+            raw = .two
         } else if straight[0] && straight[1] && straight[2] {
             raw = .three
-        } else if straight[0] && straight[1] && !straight[2] && !straight[3] {
-            raw = .two
         } else {
             raw = .point
         }
 
-        // A new shape has to hold for a moment before it counts.
+        // A new shape has to win most frames over a short window before it counts.
         let dt = present ? min(max(t - lastFrame, 0), 0.1) : 0
         lastFrame = t
         if !present {
@@ -251,14 +272,18 @@ final class GestureEngine {
             fx.reset(); fy.reset()
             held = nil; palm = nil
             trail = []; swipe = []; recent = []; notOpenSince = nil; pendingClose = nil
+            shapes = []
             shape = raw == .three || raw == .two ? .point : raw   // don't grab or scroll the instant a hand appears
-            candidate = raw
-            candidateSince = t
-        } else if raw != candidate {
-            candidate = raw
-            candidateSince = t
-        } else if raw != shape && t - candidateSince >= (raw == .two ? config.scrollHold : config.poseHold) {
-            shape = raw
+        }
+        shapes.append((t, raw))
+        shapes.removeAll { t - $0.t > 0.5 }
+        if raw != shape {
+            let hold = raw == .two ? config.scrollHold : config.poseHold
+            if let oldest = shapes.first, t - oldest.t >= hold - 0.001 {
+                let window = shapes.filter { t - $0.t <= hold + 0.001 }
+                let agree = window.filter { $0.s == raw }.count
+                if Double(agree) >= Double(window.count) * config.shapeAgreement { shape = raw }
+            }
         }
 
         // Where the hand points on screen: smoothed, then held still through tiny wobbles.
@@ -267,7 +292,8 @@ final class GestureEngine {
                              y: fy.filter(target.y, t, minCutoff: config.minCutoff, beta: config.beta, slopeCutoff: config.slopeCutoff))
         let aim = deadband(smooth)
         let k = hand.knuckles
-        palm = palm.map { CGPoint(x: $0.x + (k.x - $0.x) * 0.5, y: $0.y + (k.y - $0.y) * 0.5) } ?? k
+        let a = config.scrollSmoothing
+        palm = palm.map { CGPoint(x: $0.x + (k.x - $0.x) * a, y: $0.y + (k.y - $0.y) * a) } ?? k
 
         // Mode changes.
         let newMode: HandMode
@@ -285,8 +311,11 @@ final class GestureEngine {
             }
             mode = newMode
             if mode == .drag { out.append(.dragBegin(cursor ?? pointer)) }
-            if mode == .scroll {
+            if mode == .scroll, let palm {
                 scrollAnchor = palm
+                scrollLo = palm.y - config.scrollDeadZone
+                scrollHi = palm.y + config.scrollDeadZone
+                scrollPeak = nil
                 scrollCarry = 0
             }
             scrollDirection = 0
@@ -332,22 +361,47 @@ final class GestureEngine {
         trail.append((t, cursor ?? pointer))
         trail.removeAll { t - $0.t > 0.5 }
 
-        // Two fingers: scroll faster the further the hand is from where scrolling started.
+        // Two fingers: scroll faster the further the hand is past the stop zone around the start.
+        // Pulling back a little stops it right there, and the stop zone follows the hand back toward
+        // the start, so returning your hand never scrolls the other way.
         if mode == .scroll, let anchor = scrollAnchor, let palm {
-            let offset = palm.y - anchor.y
-            let over = abs(offset) - config.scrollDeadZone
-            if over > 0 {
-                let k = min(1, over / config.scrollRange)
+            let dz = config.scrollDeadZone, y = palm.y
+            scrollLo = min(anchor.y - dz, max(scrollLo, y - dz))
+            scrollHi = max(anchor.y + dz, min(scrollHi, y + dz))
+            var over: CGFloat = 0
+            if y > scrollHi {
+                let peak = max(scrollPeak ?? y, y)
+                if y < peak - config.scrollBackoff {
+                    scrollHi = y + dz / 2
+                    scrollPeak = nil
+                } else {
+                    scrollPeak = peak
+                    over = y - scrollHi
+                }
+            } else if y < scrollLo {
+                let peak = min(scrollPeak ?? y, y)
+                if y > peak + config.scrollBackoff {
+                    scrollLo = y - dz / 2
+                    scrollPeak = nil
+                } else {
+                    scrollPeak = peak
+                    over = y - scrollLo
+                }
+            } else {
+                scrollPeak = nil
+            }
+            if over != 0 {
+                let k = min(1, abs(over) / config.scrollRange)
                 let speed = config.scrollMaxSpeed * pow(k, config.scrollCurve)
                 // Hand down: natural scrolling moves the content down too (positive), like a trackpad.
-                let sign: CGFloat = (offset > 0 ? 1 : -1) * (config.naturalScroll ? 1 : -1)
+                let sign: CGFloat = (over > 0 ? 1 : -1) * (config.naturalScroll ? 1 : -1)
                 scrollCarry += sign * speed * CGFloat(dt)
                 let whole = scrollCarry.rounded(.towardZero)
                 if whole != 0 {
                     out.append(.scroll(Int(whole)))
                     scrollCarry -= whole
                 }
-                scrollDirection = offset > 0 ? 1 : -1
+                scrollDirection = over > 0 ? 1 : -1
             } else {
                 scrollCarry = 0
                 scrollDirection = 0

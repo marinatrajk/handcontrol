@@ -23,6 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var currentIcon = ""
 
     private var steadinessItems: [NSMenuItem] = []
+    /// A recording in progress, touched only on the tracker queue.
+    private var recording: HandRecording?
+    private var recordUntil = 0.0
 
     private var showPreviewSetting: Bool {
         get { UserDefaults.standard.object(forKey: "showCamera") as? Bool ?? true }
@@ -72,6 +75,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func handle(_ pose: HandPose?, at time: Double) {
         guard enabled else { return }
+        if recording != nil {
+            recording?.add(pose, at: time)
+            if time >= recordUntil, let finished = recording {
+                recording = nil
+                let message: String
+                do {
+                    let url = try finished.save()
+                    message = "Saved \(url.lastPathComponent)"
+                } catch {
+                    message = "Couldn't save the recording"
+                }
+                DispatchQueue.main.async { Toast.shared.show(message) }
+            }
+        }
         let actions = engine.update(pose, at: time, pointer: input.pointer)
         if InputController.hasAccess { actions.forEach(input.perform) }
         let status = engine.status
@@ -125,6 +142,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         preview?.showWindow(nil)
         preview?.window?.orderFrontRegardless()
         showPreviewSetting = true
+    }
+
+    @objc private func startRecording() {
+        guard enabled, cameraProblem == nil else {
+            Toast.shared.show("Turn hand control on to record")
+            return
+        }
+        tracker.queue.async { [self] in
+            recording = HandRecording()
+            recordUntil = CACurrentMediaTime() + 10
+        }
+        Toast.shared.show("Recording your hand for 10 seconds…")
     }
 
     @objc private func chooseSteadiness(_ sender: NSMenuItem) {
@@ -194,6 +223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let smoothnessItem = NSMenuItem(title: "Pointer Smoothness", action: nil, keyEquivalent: "")
         smoothnessItem.submenu = smoothness
         menu.addItem(smoothnessItem)
+        menu.addItem(NSMenuItem(title: "Record Hand for Tuning (10 s)", action: #selector(startRecording), keyEquivalent: ""))
         menu.addItem(.separator())
 
         accessItem = NSMenuItem(title: "", action: #selector(openAccessibilitySettings), keyEquivalent: "")

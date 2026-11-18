@@ -2,10 +2,16 @@ import CoreGraphics
 import Foundation
 
 // Drives the gesture engine with synthetic hands at 30 frames per second and checks what it does.
+// With a file argument, replays a real hand recording instead (see Replay.swift).
+
+if CommandLine.arguments.count > 1 {
+    replay(CommandLine.arguments[1])
+    exit(0)
+}
 
 // MARK: - Synthetic hands
 
-enum FingerShape { case straight, curled, pinching }
+enum FingerShape { case straight, curled, half, pinching }
 enum ThumbShape { case out, tucked, onIndexTip, wrapped }
 
 var seed: UInt64 = 42
@@ -34,6 +40,8 @@ func hand(at c: CGPoint, _ fingers: [FingerShape], thumb: ThumbShape = .tucked,
             put(f.pip, u, -0.45 * len); put(f.dip, u, -0.7 * len); put(f.tip, u, -0.9 * len)
         case .curled:
             put(f.pip, u, -0.25 * len); put(f.dip, u, -0.1 * len); put(f.tip, u, 0.2 * len)
+        case .half:   // bent at the middle joint, like a finger tucked loosely under the thumb
+            put(f.pip, u, -0.4 * len); put(f.dip, u, -0.47 * len); put(f.tip, u, -0.5 * len)
         case .pinching:
             put(f.pip, u - 0.1, -0.4); put(f.dip, u - 0.2, -0.45); put(f.tip, u - 0.3, -0.42)
         }
@@ -245,6 +253,16 @@ do {
     check(after.contains { $0.isMove }, "pointing again moves the pointer again")
     check(!after.dropFirst(6).contains { $0.isScroll }, "and scrolling stops")
 
+    let flicker = Sim()
+    flicker.run(0.5) { _ in hand(at: center, pointing) }
+    var frame = 0
+    flicker.run(0.6) { _ in frame += 1; return hand(at: center, frame % 4 == 0 ? three : two) }
+    check(flicker.engine.mode == .scroll, "two fingers still start scrolling when every 4th frame is misread")
+    let tucked = Sim()
+    tucked.run(0.5) { _ in hand(at: center, open) }
+    tucked.run(0.6) { _ in hand(at: center, [.straight, .straight, .half, .half]) }
+    check(tucked.engine.mode == .scroll, "two fingers count when ring and little are only half folded")
+
     let classic = Sim { $0.naturalScroll = false }
     classic.run(0.5) { _ in hand(at: center, pointing) }
     classic.run(0.5) { _ in hand(at: center, two) }
@@ -259,6 +277,28 @@ do {
     passing.run(0.1) { _ in hand(at: center, two) }
     passing.run(0.4) { _ in hand(at: center, three) }
     check(passing.engine.mode == .drag, "raising fingers on the way to three doesn't get stuck scrolling")
+}
+
+print("Scroll control")
+do {
+    let sim = Sim()
+    sim.run(1.0) { _ in hand(at: center, pointing) }
+    sim.run(0.5) { _ in hand(at: center, two) }
+    sim.run(0.1) { k in hand(at: at(0, 0.06 * k), two) }
+    let gentle = sim.run(1.0) { _ in hand(at: at(0, 0.06), two) }.reduce(0) { $0 + $1.scrolled }
+    check(gentle > 20 && gentle < 200, "just past the start spot it scrolls slowly", "\(gentle) px per second")
+    sim.run(0.2) { k in hand(at: at(0, 0.06 + 0.06 * k), two) }
+    sim.run(0.5) { _ in hand(at: at(0, 0.12), two) }
+    sim.run(0.1) { k in hand(at: at(0, 0.12 - 0.035 * k), two) }
+    let pulled = sim.run(0.6) { _ in hand(at: at(0, 0.085), two) }
+    check(!pulled.dropFirst(4).contains { $0.isScroll }, "pulling back a little stops scrolling right there")
+    let resumed = sim.run(0.2) { k in hand(at: at(0, 0.085 + 0.08 * k), two) } + sim.run(0.4) { _ in hand(at: at(0, 0.165), two) }
+    check(resumed.reduce(0) { $0 + $1.scrolled } > 50, "pushing further from a stop starts scrolling again")
+    sim.run(0.1) { k in hand(at: at(0, 0.165 - 0.04 * k), two) }
+    let home = sim.run(0.6) { k in hand(at: at(0, 0.125 * (1 - k)), two) } + sim.run(0.4) { _ in hand(at: center, two) }
+    check(!home.contains { $0.scrolled < 0 }, "bringing the hand back to the start never scrolls the other way")
+    let other = sim.run(0.2) { k in hand(at: at(0, -0.1 * k), two) } + sim.run(0.4) { _ in hand(at: at(0, -0.1), two) }
+    check(other.reduce(0) { $0 + $1.scrolled } < -50, "going past the start the other way scrolls the other way")
 }
 
 print("Steadiness")
