@@ -7,6 +7,8 @@ enum HandAction: Equatable {
     case click(CGPoint)
     case dragBegin(CGPoint)
     case dragEnd(CGPoint)
+    /// Scroll by this many pixels. Positive moves the content down (shows what's above), like a mouse wheel turned up.
+    case scroll(Int)
     case closeWindow
 }
 
@@ -15,6 +17,10 @@ enum HandMode: String {
     case point = "Pointing"
     case open = "Open hand · pointer parked"
     case drag = "Grabbing"
+    case scroll = "Scrolling"
+
+    /// Modes where the pointer stays put instead of following the hand.
+    var parksPointer: Bool { self == .open || self == .scroll }
 }
 
 struct EngineStatus {
@@ -22,6 +28,54 @@ struct EngineStatus {
     var straight: [Bool] = [false, false, false, false]
     var pinched = false
     var pinchGap: CGFloat = 1
+    /// Where the knuckles were when scrolling started (picture coordinates), and how far scrolling has to move from it.
+    var scrollAnchor: CGPoint?
+    var scrollDeadZone: CGFloat = 0
+    /// -1 scrolling toward the top, 1 toward the bottom, 0 not scrolling.
+    var scrollDirection = 0
+}
+
+/// How much the pointer is smoothed. Steadier means less wobble but a little more lag.
+///
+/// Measured on synthetic hands with tracking jitter and drift (./build.sh test prints these):
+/// - Responsive: wobble about 4.5 pt, settles instantly (the original feel)
+/// - Balanced:   wobble about 1.4 pt, settles in about 0.1 s
+/// - Steady:     wobble about 0.7 pt, settles in about 0.5 s
+enum Steadiness: String, CaseIterable {
+    case responsive = "Responsive"
+    case balanced = "Balanced"
+    case steady = "Steady"
+
+    var minCutoff: Double {
+        switch self {
+        case .responsive: return 1.2
+        case .balanced: return 0.3
+        case .steady: return 0.15
+        }
+    }
+    /// How quickly the filter decides the hand is really moving. Lower ignores tracking drift better.
+    var slopeCutoff: Double {
+        switch self {
+        case .responsive: return 1.0
+        case .balanced: return 0.25
+        case .steady: return 0.25
+        }
+    }
+    var beta: Double {
+        switch self {
+        case .responsive: return 0.008
+        case .balanced: return 0.008
+        case .steady: return 0.006
+        }
+    }
+    /// The pointer ignores movements smaller than this many points.
+    var deadband: CGFloat {
+        switch self {
+        case .responsive: return 0
+        case .balanced: return 5
+        case .steady: return 8
+        }
+    }
 }
 
 /// Every tunable number in one place.
@@ -43,6 +97,8 @@ struct GestureConfig {
 
     /// A new hand shape has to last this long before the mode changes.
     var poseHold = 0.12
+    /// Two fingers up has to last a bit longer, so a relaxed hand doesn't start scrolling by accident.
+    var scrollHold = 0.2
     /// The hand can vanish this long (motion blur, a missed frame) before it counts as gone.
     var lostAfter = 0.25
 
@@ -54,6 +110,15 @@ struct GestureConfig {
     var clickDeadZone: CGFloat = 30
     /// When the pointer starts following again, it glides there over this many seconds instead of jumping.
     var glide = 0.15
+
+    /// Two-finger scroll works like a joystick: move your hand up or down from where you started,
+    /// and the further you go the faster it scrolls. Distances are fractions of the picture height.
+    var scrollDeadZone: CGFloat = 0.03
+    var scrollRange: CGFloat = 0.2
+    var scrollMaxSpeed: CGFloat = 3000   // points per second at full range
+    var scrollCurve: CGFloat = 1.6
+    /// Follow the Mac's natural scrolling setting: with it on, the page moves the same way as your hand.
+    var naturalScroll = true
 
     /// Open-hand swipe down: how far (fraction of picture height), within how long, and how straight down.
     var swipeDistance: CGFloat = 0.15
@@ -67,15 +132,26 @@ struct GestureConfig {
     var swipeBottom: CGFloat = 0.92
     var closeCooldown = 1.5
 
-    /// Pointer smoothing (One Euro filter): lower minCutoff is steadier when still, higher beta lags less when moving fast.
-    var minCutoff = 1.2
-    var beta = 0.008
+    /// Pointer smoothing: a One Euro filter (lower minCutoff is steadier when still, higher beta lags less
+    /// when moving fast), then a small dead band that swallows leftover wobble.
+    var minCutoff = Steadiness.balanced.minCutoff
+    var beta = Steadiness.balanced.beta
+    var deadband = Steadiness.balanced.deadband
+    var slopeCutoff = Steadiness.balanced.slopeCutoff
+
+    mutating func apply(_ steadiness: Steadiness) {
+        minCutoff = steadiness.minCutoff
+        beta = steadiness.beta
+        deadband = steadiness.deadband
+        slopeCutoff = steadiness.slopeCutoff
+    }
 }
 
 /// Turns a stream of hand poses into pointer actions. Pure logic with no camera or system calls, so it can be tested.
 ///
 /// - Any relaxed or pointing hand: the pointer follows your knuckles.
 /// - Pinch thumb and index: click (pinch twice quickly to double-click).
+/// - Two fingers up (index, middle): scroll. Move up or down from where you started; further is faster.
 /// - Three fingers up (index, middle, ring): grab. The button stays down while you move; change shape to drop.
 /// - Flat open hand (four fingers straight): the pointer parks. Swipe it down to close the front window.
 final class GestureEngine {
@@ -88,21 +164,32 @@ final class GestureEngine {
     /// The last pointer position this engine produced.
     private(set) var cursor: CGPoint?
 
-    var status: EngineStatus { EngineStatus(mode: mode, straight: straight, pinched: pinched, pinchGap: pinchGap) }
+    var status: EngineStatus {
+        EngineStatus(mode: mode, straight: straight, pinched: pinched, pinchGap: pinchGap,
+                     scrollAnchor: mode == .scroll ? scrollAnchor : nil,
+                     scrollDeadZone: config.scrollDeadZone, scrollDirection: scrollDirection)
+    }
 
-    private enum Shape { case point, three, open }
+    private enum Shape { case point, two, three, open }
     private var shape = Shape.point
     private var candidate = Shape.point
     private var candidateSince = 0.0
     private var present = false
     private var lastSeen = -Double.infinity
+    private var lastFrame = 0.0
     private var pointer = CGPoint.zero
 
     private var fx = OneEuro()
     private var fy = OneEuro()
+    private var held: CGPoint?
     private var trail: [(t: Double, p: CGPoint)] = []
     private var lock: (p: CGPoint, until: Double)?
     private var glideFrom: (p: CGPoint, t: Double)?
+
+    private var palm: CGPoint?
+    private var scrollAnchor: CGPoint?
+    private var scrollCarry: CGFloat = 0
+    private var scrollDirection = 0
 
     private var swipe: [(t: Double, p: CGPoint)] = []
     private var recent: [(t: Double, p: CGPoint)] = []
@@ -142,7 +229,7 @@ final class GestureEngine {
             pinched = true
         }
 
-        // Hand shape. A hand on its way into a pinch is never "open" or "three".
+        // Hand shape. A hand on its way into a pinch is always "pointing".
         let raw: Shape
         if pinchGap < config.pinchOff {
             raw = .point
@@ -150,46 +237,65 @@ final class GestureEngine {
             raw = .open
         } else if straight[0] && straight[1] && straight[2] {
             raw = .three
+        } else if straight[0] && straight[1] && !straight[2] && !straight[3] {
+            raw = .two
         } else {
             raw = .point
         }
 
         // A new shape has to hold for a moment before it counts.
+        let dt = present ? min(max(t - lastFrame, 0), 0.1) : 0
+        lastFrame = t
         if !present {
             present = true
             fx.reset(); fy.reset()
+            held = nil; palm = nil
             trail = []; swipe = []; recent = []; notOpenSince = nil; pendingClose = nil
-            shape = raw == .three ? .point : raw   // don't grab the instant a hand appears
+            shape = raw == .three || raw == .two ? .point : raw   // don't grab or scroll the instant a hand appears
             candidate = raw
             candidateSince = t
         } else if raw != candidate {
             candidate = raw
             candidateSince = t
-        } else if raw != shape && t - candidateSince >= config.poseHold {
+        } else if raw != shape && t - candidateSince >= (raw == .two ? config.scrollHold : config.poseHold) {
             shape = raw
         }
 
-        // Where the hand points on screen, smoothed.
+        // Where the hand points on screen: smoothed, then held still through tiny wobbles.
         let target = toScreen(hand.knuckles)
-        let aim = CGPoint(x: fx.filter(target.x, t, minCutoff: config.minCutoff, beta: config.beta),
-                          y: fy.filter(target.y, t, minCutoff: config.minCutoff, beta: config.beta))
+        let smooth = CGPoint(x: fx.filter(target.x, t, minCutoff: config.minCutoff, beta: config.beta, slopeCutoff: config.slopeCutoff),
+                             y: fy.filter(target.y, t, minCutoff: config.minCutoff, beta: config.beta, slopeCutoff: config.slopeCutoff))
+        let aim = deadband(smooth)
+        let k = hand.knuckles
+        palm = palm.map { CGPoint(x: $0.x + (k.x - $0.x) * 0.5, y: $0.y + (k.y - $0.y) * 0.5) } ?? k
 
         // Mode changes.
-        let newMode: HandMode = shape == .open ? .open : shape == .three ? .drag : .point
+        let newMode: HandMode
+        switch shape {
+        case .open: newMode = .open
+        case .three: newMode = .drag
+        case .two: newMode = .scroll
+        case .point: newMode = .point
+        }
         if newMode != mode {
             if mode == .drag { out.append(.dragEnd(cursor ?? pointer)) }
-            if newMode != .open && (mode == .open || mode == .none) {
+            if !newMode.parksPointer && (mode.parksPointer || mode == .none) {
                 glideFrom = (pointer, t)
                 cursor = pointer
             }
             mode = newMode
             if mode == .drag { out.append(.dragBegin(cursor ?? pointer)) }
+            if mode == .scroll {
+                scrollAnchor = palm
+                scrollCarry = 0
+            }
+            scrollDirection = 0
         }
 
         // Click the moment a pinch closes.
         if pinched && !wasPinched && mode != .drag {
             var p = cursor ?? pointer
-            if mode == .open {
+            if mode.parksPointer {
                 p = pointer
             } else if lock == nil, glideFrom == nil, let past = trail.last(where: { $0.t <= t - config.clickLookback }) {
                 p = past.p
@@ -225,6 +331,28 @@ final class GestureEngine {
         }
         trail.append((t, cursor ?? pointer))
         trail.removeAll { t - $0.t > 0.5 }
+
+        // Two fingers: scroll faster the further the hand is from where scrolling started.
+        if mode == .scroll, let anchor = scrollAnchor, let palm {
+            let offset = palm.y - anchor.y
+            let over = abs(offset) - config.scrollDeadZone
+            if over > 0 {
+                let k = min(1, over / config.scrollRange)
+                let speed = config.scrollMaxSpeed * pow(k, config.scrollCurve)
+                // Hand down: natural scrolling moves the content down too (positive), like a trackpad.
+                let sign: CGFloat = (offset > 0 ? 1 : -1) * (config.naturalScroll ? 1 : -1)
+                scrollCarry += sign * speed * CGFloat(dt)
+                let whole = scrollCarry.rounded(.towardZero)
+                if whole != 0 {
+                    out.append(.scroll(Int(whole)))
+                    scrollCarry -= whole
+                }
+                scrollDirection = offset > 0 ? 1 : -1
+            } else {
+                scrollCarry = 0
+                scrollDirection = 0
+            }
+        }
 
         // Open hand swiped down: close the front window.
         recent.append((t, hand.knuckles))
@@ -273,8 +401,12 @@ final class GestureEngine {
         pinched = false
         straight = [false, false, false, false]
         cursor = nil
+        held = nil
         lock = nil
         glideFrom = nil
+        palm = nil
+        scrollAnchor = nil
+        scrollDirection = 0
         swipe = []
         recent = []
         pendingClose = nil
@@ -287,6 +419,21 @@ final class GestureEngine {
         let nx = min(max((p.x - r.minX) / r.width, 0), 1)
         let ny = min(max((p.y - r.minY) / r.height, 0), 1)
         return CGPoint(x: nx * (config.screen.width - 1), y: ny * (config.screen.height - 1))
+    }
+
+    /// Holds the pointer still until the smoothed position moves more than `deadband` points away,
+    /// then trails it by that much. Removes the last bit of wobble when your hand is still.
+    private func deadband(_ p: CGPoint) -> CGPoint {
+        guard config.deadband > 0, let h = held else {
+            held = p
+            return p
+        }
+        let d = distance(p, h)
+        guard d > config.deadband else { return h }
+        let k = (d - config.deadband) / d
+        let next = CGPoint(x: h.x + (p.x - h.x) * k, y: h.y + (p.y - h.y) * k)
+        held = next
+        return next
     }
 
     /// How fast the knuckles moved over the last ~0.1 s, in picture heights per second.

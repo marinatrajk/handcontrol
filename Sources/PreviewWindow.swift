@@ -124,6 +124,25 @@ private final class OverlayView: NSView {
             let k = map(pose.knuckles)
             color.setFill()
             NSBezierPath(ovalIn: CGRect(x: k.x - 7, y: k.y - 7, width: 14, height: 14)).fill()
+
+            // Scrolling: the band where it stops, and a line out to the hand when it's scrolling.
+            if let anchor = status.scrollAnchor {
+                let a = map(anchor)
+                let half = status.scrollDeadZone * video.height
+                let band = NSBezierPath(roundedRect: CGRect(x: a.x - 34, y: a.y - half, width: 68, height: half * 2),
+                                        xRadius: 6, yRadius: 6)
+                NSColor.systemPurple.withAlphaComponent(0.25).setFill()
+                band.fill()
+                if status.scrollDirection != 0 {
+                    let line = NSBezierPath()
+                    line.move(to: a)
+                    line.line(to: CGPoint(x: a.x, y: k.y))
+                    line.lineWidth = 4
+                    line.lineCapStyle = .round
+                    NSColor.systemPurple.setStroke()
+                    line.stroke()
+                }
+            }
         }
 
         drawLabel(in: video)
@@ -135,6 +154,7 @@ private final class OverlayView: NSView {
         case .point: return .systemBlue
         case .open: return .systemYellow
         case .drag: return .systemGreen
+        case .scroll: return .systemPurple
         }
     }
 
@@ -146,7 +166,10 @@ private final class OverlayView: NSView {
             text = "Raise your hand into view"
         } else {
             let up = status.straight.filter { $0 }.count
-            let mode = status.pinched ? "Pinch · click" : status.mode.rawValue
+            var mode = status.pinched ? "Pinch · click" : status.mode.rawValue
+            if status.mode == .scroll {
+                mode = status.scrollDirection == 0 ? "Scroll · move up or down" : "Scrolling"
+            }
             text = "\(mode) · \(up) finger\(up == 1 ? "" : "s") up · pinch gap \(String(format: "%.2f", status.pinchGap))"
         }
         let attributes: [NSAttributedString.Key: Any] = [

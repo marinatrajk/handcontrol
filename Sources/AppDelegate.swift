@@ -22,14 +22,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var flashUntil = 0.0
     private var currentIcon = ""
 
+    private var steadinessItems: [NSMenuItem] = []
+
     private var showPreviewSetting: Bool {
         get { UserDefaults.standard.object(forKey: "showCamera") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "showCamera") }
     }
 
+    private var steadiness: Steadiness {
+        get { UserDefaults.standard.string(forKey: "steadiness").flatMap(Steadiness.init(rawValue:)) ?? .balanced }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "steadiness") }
+    }
+
+    /// The Mac's own scroll direction setting (System Settings › Trackpad › Natural scrolling).
+    private var naturalScrolling: Bool {
+        UserDefaults.standard.object(forKey: "com.apple.swipescrolldirection") as? Bool ?? true
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         buildMenu()
+        let level = steadiness
+        tracker.queue.async { [self] in engine.config.apply(level) }
         screenChanged()
         NotificationCenter.default.addObserver(self, selector: #selector(screenChanged),
                                                name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -113,6 +127,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         showPreviewSetting = true
     }
 
+    @objc private func chooseSteadiness(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let level = Steadiness(rawValue: raw) else { return }
+        steadiness = level
+        tracker.queue.async { [self] in engine.config.apply(level) }
+        refresh()
+    }
+
     @objc private func openAccessibilitySettings() {
         InputController.askForAccess()
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
@@ -159,6 +180,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(toggleItem)
         previewItem = NSMenuItem(title: "Show Camera", action: #selector(togglePreview), keyEquivalent: "")
         menu.addItem(previewItem)
+
+        let smoothness = NSMenu()
+        for (level, note) in [(Steadiness.responsive, "snappiest, a bit wobbly"),
+                              (.balanced, "steady, still quick"),
+                              (.steady, "steadiest, settles slower")] {
+            let item = NSMenuItem(title: "\(level.rawValue) · \(note)", action: #selector(chooseSteadiness(_:)), keyEquivalent: "")
+            item.representedObject = level.rawValue
+            item.target = self
+            smoothness.addItem(item)
+            steadinessItems.append(item)
+        }
+        let smoothnessItem = NSMenuItem(title: "Pointer Smoothness", action: nil, keyEquivalent: "")
+        smoothnessItem.submenu = smoothness
+        menu.addItem(smoothnessItem)
         menu.addItem(.separator())
 
         accessItem = NSMenuItem(title: "", action: #selector(openAccessibilitySettings), keyEquivalent: "")
@@ -171,6 +206,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for line in [
             "Move your hand: the pointer follows your knuckles",
             "Pinch thumb and index: click (twice for double-click)",
+            "Two fingers up: scroll. Move up or down from where you started; further is faster",
             "Three fingers up: grab and drag, open your hand to drop",
             "Flat open hand: the pointer parks",
             "Open hand, swipe down: close the front window",
@@ -202,6 +238,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         accessItem.isEnabled = !access
         cameraItem.title = cameraProblem.map { "\($0) · open settings…" } ?? "Camera: allowed"
         cameraItem.isEnabled = cameraProblem != nil
+        let level = steadiness
+        for item in steadinessItems { item.state = item.representedObject as? String == level.rawValue ? .on : .off }
+        let natural = naturalScrolling
+        tracker.queue.async { [self] in engine.config.naturalScroll = natural }
         updateIcon()
     }
 
@@ -219,6 +259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .point: symbol = "hand.point.up.left.fill"
             case .open: symbol = "hand.raised.fill"
             case .drag: symbol = "hand.draw.fill"
+            case .scroll: symbol = "arrow.up.and.down"
             }
         }
         guard symbol != currentIcon, let button = statusItem.button else { return }

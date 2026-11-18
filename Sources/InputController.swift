@@ -40,10 +40,23 @@ final class InputController {
             case .dragEnd(let p):
                 dragging = false
                 post(.leftMouseUp, at: p, clickState: 1)
+            case .scroll(let pixels):
+                // Split each camera frame's scroll in two, so pages move at 60 steps a second instead of 30.
+                let first = pixels / 2
+                scroll(first)
+                usleep(16_000)
+                scroll(pixels - first)
             case .closeWindow:
                 break
             }
         }
+    }
+
+    /// Scrolls the window under the pointer. Positive shows what's above, like turning a mouse wheel up.
+    private func scroll(_ pixels: Int) {
+        guard pixels != 0 else { return }
+        CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 1,
+                wheel1: Int32(clamping: pixels), wheel2: 0, wheel3: 0)?.post(tap: .cghidEventTap)
     }
 
     private func click(at p: CGPoint) {
